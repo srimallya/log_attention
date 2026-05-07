@@ -54,8 +54,8 @@ config = dict(
     hint_len=64,
 
     # training
-    batch_size=4,
-    max_steps=2500,
+    batch_size=8,
+    max_steps=25000,
     eval_interval=200,
     eval_iters=10,
     learning_rate=3e-4,
