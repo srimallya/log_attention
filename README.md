@@ -77,6 +77,8 @@ Important fields:
 | `use_self_distill` | Enables EMA-teacher self-distillation. |
 | `enable_post_training_plots` | Saves post-training PNG plots. |
 | `enable_attention_video` | Saves the side-by-side attention evolution video. |
+| `attention_video_max_rows` | Wraps layer heatmaps into more columns after this many rows. Defaults to `2` for a horizontal desktop layout. |
+| `attention_video_max_heatmap_size` | Display-only cap for attention heatmap resolution in the video. |
 
 For most first runs, keep `attention_method="all"` so the standard and log-decay models are trained under matching conditions.
 
@@ -132,9 +134,11 @@ checkpoints_log_decay/attention_evolution.mp4
 
 The video layout is:
 
-- rows: transformer layers
-- columns: trained attention methods, such as `dot` and `log_decay`
+- rows: transformer layers, wrapped after `attention_video_max_rows` to favor a horizontal desktop layout
+- columns: trained attention methods and wrapped layer groups
 - frames: evaluation steps
+
+For larger contexts, heatmaps are average-pooled for display to at most `attention_video_max_heatmap_size` pixels per side. This keeps 512+ token attention maps readable on a desktop screen without changing the captured model diagnostics or training.
 
 This makes it easier to inspect whether the log-decay model merely changes loss, or actually learns a different attention geometry over time.
 

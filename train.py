@@ -50,20 +50,20 @@ config = dict(
     val_frac=0.10,
 
     # sequence
-    block_size=256,
-    hint_len=64,
+    block_size=512,
+    hint_len=256,
 
     # training
     batch_size=8,
-    max_steps=25000,
+    max_steps=20000,
     eval_interval=200,
-    eval_iters=10,
+    eval_iters=50,
     learning_rate=3e-4,
     weight_decay=0.01,
     grad_clip=1.0,
 
     # model
-    n_layer=4,
+    n_layer=8,
     n_head=8,
     n_embd=512,
     dropout=0.20,
@@ -82,9 +82,9 @@ config = dict(
 
     # Optional lower/upper clamp for diagnostics only.
     # The actual alpha is not hard-clamped unless use_alpha_clamp=True.
-    use_alpha_clamp=False,
+    use_alpha_clamp=True,
     alpha_min=0.0,
-    alpha_max=8.0,
+    alpha_max=1.5,
 
     # Attention diagnostics
     long_range_fraction=0.50,  # report attention mass going to tokens older than 50% of context
@@ -98,9 +98,11 @@ config = dict(
     enable_attention_video=True,
     attention_video_fps=2,
     attention_video_probe_batch=1,
+    attention_video_max_rows=2,
+    attention_video_max_heatmap_size=256,
 
     # self-distillation
-    use_self_distill=False,
+    use_self_distill=True,
     distill_weight=0.15,
     distill_temperature=2.0,
     ema_decay=0.995,
@@ -108,7 +110,7 @@ config = dict(
     teacher_entropy_margin=0.05,
 
     # sampling
-    sample_tokens=300,
+    sample_tokens=50,
     top_k=90,
     temperature=0.8,
     sample_prefix="",
@@ -1081,6 +1083,8 @@ def print_config_summary(models):
     print(f"n_head: {config['n_head']}")
     print(f"n_embd: {config['n_embd']}")
     print(f"dropout: {config['dropout']}")
+    print(f"attention_video_max_rows: {config['attention_video_max_rows']}")
+    print(f"attention_video_max_heatmap_size: {config['attention_video_max_heatmap_size']}")
     print(f"learning_rate: {config['learning_rate']}")
     print(f"weight_decay: {config['weight_decay']}")
     print(f"grad_clip: {config['grad_clip']}")
@@ -1389,6 +1393,33 @@ def collect_attention_snapshot(step, models, probe_x):
     return snapshot
 
 
+def attention_video_layer_grid(n_layer):
+    max_rows = max(1, int(config["attention_video_max_rows"]))
+    layer_cols = max(1, math.ceil(n_layer / max_rows))
+    layer_rows = math.ceil(n_layer / layer_cols)
+
+    return layer_rows, layer_cols
+
+
+def render_attention_map(attention_map):
+    max_size = int(config["attention_video_max_heatmap_size"])
+
+    if max_size <= 0 or max(attention_map.shape) <= max_size:
+        return attention_map.numpy()
+
+    height, width = attention_map.shape
+    out_h = min(height, max_size)
+    out_w = min(width, max_size)
+
+    # Average-pool for display only, so 512+ token maps stay readable and videos stay small.
+    pooled = F.adaptive_avg_pool2d(
+        attention_map.view(1, 1, height, width),
+        (out_h, out_w),
+    )
+
+    return pooled.squeeze(0).squeeze(0).numpy()
+
+
 def build_attention_video(attention_snapshots, model_names):
     if not config["enable_attention_video"]:
         return None
@@ -1406,12 +1437,14 @@ def build_attention_video(attention_snapshots, model_names):
 
     os.makedirs(os.path.dirname(config["attention_video_path"]), exist_ok=True)
 
-    rows = config["n_layer"]
-    cols = len(model_names)
+    n_layer = config["n_layer"]
+    layer_rows, layer_cols = attention_video_layer_grid(n_layer)
+    rows = layer_rows
+    cols = len(model_names) * layer_cols
     fig, axes = plt.subplots(
         rows,
         cols,
-        figsize=(4.2 * cols, 3.6 * rows),
+        figsize=(3.2 * cols, 3.0 * rows),
         squeeze=False,
     )
 
@@ -1425,11 +1458,13 @@ def build_attention_video(attention_snapshots, model_names):
 
     vmax = max(vmax, 1e-6)
 
-    for layer_idx in range(rows):
-        image_row = []
+    for layer_idx in range(n_layer):
+        layer_row = layer_idx // layer_cols
+        layer_col = layer_idx % layer_cols
+
         for col_idx, name in enumerate(model_names):
-            ax = axes[layer_idx][col_idx]
-            first_map = attention_snapshots[0]["models"][name][layer_idx].numpy()
+            ax = axes[layer_row][col_idx * layer_cols + layer_col]
+            first_map = render_attention_map(attention_snapshots[0]["models"][name][layer_idx])
             image = ax.imshow(
                 first_map,
                 vmin=0.0,
@@ -1441,8 +1476,15 @@ def build_attention_video(attention_snapshots, model_names):
             ax.set_title(f"{name} L{layer_idx}")
             ax.set_xlabel("key position")
             ax.set_ylabel("query position")
-            image_row.append(image)
-        images.append(image_row)
+            ax.set_xticks([])
+            ax.set_yticks([])
+            images.append((layer_idx, col_idx, image))
+
+    for col_idx in range(len(model_names)):
+        for slot_idx in range(n_layer, layer_rows * layer_cols):
+            layer_row = slot_idx // layer_cols
+            layer_col = slot_idx % layer_cols
+            axes[layer_row][col_idx * layer_cols + layer_col].axis("off")
 
     title = fig.suptitle("")
     fig.tight_layout()
@@ -1452,12 +1494,10 @@ def build_attention_video(attention_snapshots, model_names):
         title.set_text(f"attention evolution - step {snapshot['step']}")
 
         artists = [title]
-        for layer_idx in range(rows):
-            for col_idx, name in enumerate(model_names):
-                images[layer_idx][col_idx].set_array(
-                    snapshot["models"][name][layer_idx].numpy()
-                )
-                artists.append(images[layer_idx][col_idx])
+        for layer_idx, col_idx, image in images:
+            name = model_names[col_idx]
+            image.set_array(render_attention_map(snapshot["models"][name][layer_idx]))
+            artists.append(image)
 
         return artists
 

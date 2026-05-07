@@ -3,3 +3,5 @@ __pycache__/
 .DS_Store
 
 checkpoints_log_decay/
+checkpoints_log_decay 2.zip
+checkpoints_log_decay.zip
