@@ -1,8 +1,10 @@
 # log_attention
 
-`log_attention` is a compact PyTorch character-language-modeling experiment for comparing ordinary causal attention against a learned log-decayed causal attention rule.
+`log_attention` is a compact PyTorch character-language-modeling experiment comparing ordinary causal dot-product attention against a learned log-decayed causal attention mechanism.
 
-The main script trains a small GPT-style character model on `input.txt`, optionally runs a dot-attention baseline and a log-decay model side by side, saves best checkpoints, logs metrics to CSV, generates samples during training, and creates post-training plots plus an attention-evolution video.
+The core idea: standard causal attention lets every previous token compete using content similarity alone. The log-decay variant keeps that content score but subtracts a **learned per-head distance tax** that grows logarithmically with token age. Nearby tokens have a structural advantage by default, but important distant tokens can still win by being content-strong enough to overcome the tax.
+
+The main script trains a small GPT-style character model on `input.txt`, runs dot and log_decay models side-by-side on identical batches, saves best checkpoints, logs detailed metrics to CSV, generates samples during training, creates post-training diagnostic plots, and renders an attention-evolution video.
 
 The repository is intentionally small:
 
@@ -20,7 +22,14 @@ The experiment asks a simple question:
 
 Can a transformer keep useful long-range context while applying an explicit learned penalty to older tokens?
 
-Standard causal attention lets every previous token compete using content similarity alone. The log-decay variant keeps that content score, but subtracts a learned distance cost that grows as the key token gets older. Nearby context starts with an advantage, but older tokens can still win if their content score is strong enough.
+The novelty is not in the components but in their combination: a **learned, multiplicative power-law distance prior** applied per-head, on top of standard dot-product attention. This is different from:
+
+- **Relative position encodings** (Shaw et al., 2018): add learned embeddings per distance — log-decay uses one scalar per head, no embedding table.
+- **ALiBi** (Press et al., 2021): a fixed non-learned linear bias — log-decay is learned and nonlinear.
+- **Sliding window attention**: hard-restricts the span — log-decay never restricts, only taxes.
+- **Low-rank / sparse approximations**: change what can be attended to — log-decay keeps full dense attention and modulates it.
+
+The `(1 + distance)^(-alpha)` form is theoretically motivated by power-law distributions observed in natural language (Zipf's law). And because alpha is **per-head and learned**, different layers autonomously discover different optimal attention spans — early layers often learn weak decay (preserve broad context), middle layers often learn strong decay (local composition), and the final layer often relaxes again (needs range for output).
 
 The script supports three modes:
 
@@ -30,7 +39,7 @@ The script supports three modes:
 | `log_decay` | Train only the log-decayed attention model. |
 | `all` | Train both models side by side on the same batches. |
 
-By default, the script is set up as an experiment runner rather than a library. Most configuration lives in the `config` dictionary near the top of `train.py`.
+By default, the script runs in `all` mode, enabling a clean controlled comparison where both models see identical data batches in identical order. Most configuration lives in the `config` dictionary near the top of `train.py`.
 
 ## Quick Start
 
@@ -165,20 +174,21 @@ Each checkpoint contains:
 
 ## Self-Distillation
 
-The script includes an optional self-distillation path controlled by:
+The script includes an optional self-distillation path controlled by `use_self_distill=True`. It combines three mechanisms:
 
-```python
-use_self_distill=True
+**1. Privileged prefix.** The teacher sees a longer context than the student (by default, 256 extra tokens via `hint_len`). The student predicts tokens that the teacher conditioned on with more history. The teacher has a structural advantage without being a different architecture.
+
+**2. EMA teacher.** The teacher is a slow exponential-moving-average copy of the student itself (`ema_decay=0.995`). It is not separately trained — it tracks the student's own improving predictions, making it a smoothed, ensemble-like target.
+
+**3. Entropy-filtered KL.** The student loss is:
 ```
+L = L_CE + 0.15 * L_KD
+```
+where `L_KD` is only applied at positions where the teacher's prediction entropy is lower than the student's by more than 0.05 nats. This means distillation only activates where the teacher is demonstrably more confident — avoiding "the blind leading the blind."
 
-In this mode:
+The hypothesis tested by self-distillation: **can the student internalize the benefit of seeing further back, without actually needing that context at inference time?**
 
-1. The student sees a normal context window.
-2. The EMA teacher sees the same context plus a privileged prefix.
-3. The student optimizes language-modeling cross entropy plus a KL distillation term.
-4. Distillation can be entropy-filtered so the student only learns from teacher positions where the teacher is more confident.
-
-This is off by default. Enable it when you specifically want to test whether a teacher with extra prefix context can transfer useful information into the normal-context student.
+This is off by default (`use_self_distill=False`). Enable it when specifically testing context compression.
 
 ## Practical Notes
 
@@ -205,7 +215,41 @@ torch.manual_seed(config["seed"])
 
 This improves repeatability, but exact results can still differ by device, PyTorch backend, and nondeterministic kernels.
 
-## License
+## Results
+
+The main control study runs both models side-by-side for 20,000 steps on a Harry Potter corpus (~5M training tokens). Key findings:
+
+| Metric | DOT | LOG_DECAY |
+|---|---|---|
+| Best validation loss | 1.0986 | **1.0890** |
+| Long-range attention mass | 6.19% | **3.94%** |
+| Per-head alpha @ 20k | — | 0.37–1.19 (layer-dependent) |
+
+Log-decay wins at **91% of late-stage evaluations** (steps 5000–20000), with a mean delta of **-0.026 nats** in favor of log-decay. The gap widens at higher steps rather than closing, suggesting the advantage compounds with training.
+
+The most striking result is **alpha specialization by layer.** The model discovers that early layers (L0, L1) benefit from weak decay (alpha ≈ 0.37), middle layers (L4, L5) benefit from strong decay (alpha ≈ 1.13–1.19), and the final layer relaxes again (alpha ≈ 0.82). This emergent structure matches intuition about what different transformer layers do — early layers extract local features, middle layers compose them, and the final layer needs range to produce coherent output.
+
+Critically, log-decay achieves better perplexity **while spending 36% less attention mass on very distant tokens** (>50% of context window). The model is not "doing more with more" — it is being more selective about what it pays attention to, and the log-decay mechanism is how it enforces that selectivity.
+
+See `checkpoints_log_decay/plots_log_scale/late_stage_summary.md` for the full late-stage statistics.
+
+### Training and validation loss
+
+Both models train on identical batches. Log-decay starts slightly better and maintains its lead throughout.
+
+![train and val loss](checkpoints_log_decay/plots_log_scale/01_train_val_lm_loss_log.png)
+
+### Per-layer alpha specialization
+
+Alpha values at step 20,000. Early layers (L0, L1) learn weak decay — they need broad context for character-level feature extraction. Middle layers (L4, L5) learn strong decay — locality pays off during composition. The final layer (L7) relaxes again, needing range for coherent output. The model discovers this structure without any explicit architectural instruction.
+
+![layerwise alpha](checkpoints_log_decay/plots_log_scale/05_layerwise_alpha_log.png)
+
+### Long-range attention mass
+
+Dot-model consistently spends ~6% of its attention budget on tokens older than half the context window. Log-decay suppresses this to ~4% — a 36% reduction — while still achieving better perplexity. The mechanism is doing exactly what it was designed to do.
+
+![long-range attention mass](checkpoints_log_decay/plots_log_scale/06_long_range_attention_mass_log.png)
 
 This repository is licensed under the MIT License. See `LICENSE`.
 
@@ -282,42 +326,15 @@ This is different from a hard local window. A hard window forbids distant tokens
 
 ## Diagnostics
 
-The script logs several attention diagnostics.
+The script logs several attention diagnostics at every evaluation interval.
 
-Mean attention distance:
+**Mean attention distance** is the average of `(i - j)` weighted by attention probability, across all batch elements, heads, and query positions. Intuition: *"on average, how many tokens back does the model look when it attends?"*
 
-```text
-D_mean = mean_{batch, head, i} sum_{j <= i} a_ij (i - j)
-```
+**Long-range attention mass** (with `long_range_fraction=0.50`) is the fraction of total attention weight falling on tokens more than half the context window back. With `block_size=512`, this tracks attention paid to tokens ≥256 positions older. Intuition: *"what fraction of the attention budget is spent on very distant context?"*
 
-This estimates how far back the model attends on average.
+For log-decay models, the script also logs `alpha_mean`, `alpha_min`, `alpha_max`, and per-layer `L{n}_alpha_mean`. These tell you how strongly each head penalizes distant tokens. Layer-wise alpha is useful because early layers often learn local character composition while later layers may preserve broader context — the code reveals this emergent specialization.
 
-Long-range attention mass:
-
-```text
-M_long = mean_{batch, head, i} sum_{j <= i, i - j >= tau} a_ij
-```
-
-where:
-
-```text
-tau = floor(block_size * long_range_fraction)
-```
-
-This tracks how much probability mass goes to older positions.
-
-For log-decay models, the script also logs:
-
-```text
-alpha_mean
-alpha_min
-alpha_max
-L0_alpha_mean
-L1_alpha_mean
-...
-```
-
-Layer-wise alpha is useful because early layers may learn local character composition while later layers may preserve broader context.
+**What to look for in the diagnostics:** log-decay should show lower `long_attn_mass` than dot at comparable steps (less reaching back wastefully), and alpha values that drift upward from the init (the model discovering locality helps). Per-layer alpha values will differ — this is the model learning *where* locality is useful.
 
 ## Distillation Objective
 
@@ -363,3 +380,7 @@ H(p) = - sum_c p_c log p_c
 ```
 
 This avoids forcing the student to imitate uncertain teacher predictions.
+
+## License
+
+This repository is licensed under the MIT License. See `LICENSE`.
