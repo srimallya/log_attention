@@ -237,19 +237,19 @@ See `checkpoints_log_decay/plots_log_scale/late_stage_summary.md` for the full l
 
 Both models train on identical batches. Log-decay starts slightly better and maintains its lead throughout.
 
-![train and val loss](checkpoints_log_decay/plots_log_scale/01_train_val_lm_loss_log.png)
+![train and val loss](figures/01_train_val_lm_loss_log.png)
 
 ### Per-layer alpha specialization
 
 Alpha values at step 20,000. Early layers (L0, L1) learn weak decay — they need broad context for character-level feature extraction. Middle layers (L4, L5) learn strong decay — locality pays off during composition. The final layer (L7) relaxes again, needing range for coherent output. The model discovers this structure without any explicit architectural instruction.
 
-![layerwise alpha](checkpoints_log_decay/plots_log_scale/05_layerwise_alpha_log.png)
+![layerwise alpha](figures/05_layerwise_alpha_log.png)
 
 ### Long-range attention mass
 
 Dot-model consistently spends ~6% of its attention budget on tokens older than half the context window. Log-decay suppresses this to ~4% — a 36% reduction — while still achieving better perplexity. The mechanism is doing exactly what it was designed to do.
 
-![long-range attention mass](checkpoints_log_decay/plots_log_scale/06_long_range_attention_mass_log.png)
+![long-range attention mass](figures/06_long_range_attention_mass_log.png)
 
 This repository is licensed under the MIT License. See `LICENSE`.
 
