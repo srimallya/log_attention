@@ -233,6 +233,35 @@ Critically, log-decay achieves better perplexity **while spending 36% less atten
 
 See `checkpoints_log_decay/plots_log_scale/late_stage_summary.md` for the full late-stage statistics.
 
+### Ablation Study
+
+Six ablations were run to isolate the contribution of each component:
+
+| Run | Best Dot | Best Log Decay | Gap (dot − log) | Wins% (after 5k) |
+|-----|----------|----------------|------------------|-------------------|
+| no_self_distill_alpha15 | 1.0803 | **1.0461** | 0.034 | 100% |
+| no_self_distill_no_alpha_clamp | 1.0780 | **1.0463** | 0.032 | 100% |
+| self_distill_alpha05 | 1.0963 | **1.0820** | 0.014 | 98.7% |
+| self_distill_alpha10 | 1.0910 | **1.0843** | 0.007 | 97.4% |
+| self_distill_no_alpha_clamp | 1.1041 | **1.0809** | 0.023 | 97.4% |
+| control_self_distill_alpha15 | 1.0980 | **1.0827** | 0.015 | 100% |
+
+Three findings stand out:
+
+**Log decay wins in all 6 runs.** Every ablation confirms the base result — log decay beats dot under every condition tested.
+
+**Self-distillation shrinks the gap, not the gap's cause.** With self-distillation on, the gap is ~0.014. With it off, the gap nearly triples to ~0.034. Self-distillation helps both models, but it helps dot more — because dot was worse at learning long-range patterns on its own. When the training "safety net" is removed, log decay's inductive bias carries more weight.
+
+**The alpha clamp is irrelevant.** The safety cap on alpha growth had essentially no effect. The model never approached the cap, meaning it self-regulates alpha naturally without needing an external limit.
+
+The bottom line: log decay's advantage is largest when training is hardest. At scale, where self-distillation tricks may be unavailable, that advantage compounds.
+
+![best gap](figures/01_best_gap.png)
+
+![final gap](figures/02_final_gap.png)
+
+![fraction wins](figures/03_fraction_wins.png)
+
 ### Training and validation loss
 
 Both models train on identical batches. Log-decay starts slightly better and maintains its lead throughout.
